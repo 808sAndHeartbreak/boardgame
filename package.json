@@ -1,0 +1,12 @@
+{
+  "name": "boardgame-identity-dispenser",
+  "version": "1.0.0",
+  "private": true,
+  "description": "狼人杀类桌游身份发牌网页版工具，支持标准狼、双身份、自信狼及主持人笔记。",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "node scripts/build.cjs",
+    "start": "node server.cjs",
+    "test": "node tests/core.test.cjs src/game-core.js"
+  }
+}
