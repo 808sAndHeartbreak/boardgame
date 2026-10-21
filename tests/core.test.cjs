@@ -58,7 +58,7 @@ check('confidence actors, miswake, empty knife and truthful seer', () => {
   assert(g.events.find(e=>e.seat===2).noLastWords); assert(a.awakenedWolves(g).has(1));
   a.restoreCard(g,2,0); assert(a.playerStatus(g,g.players[1]).alive); assert(!g.actions['2:wolves'].actors.includes(2));
   result = a.recordAction(g,'wolves',{actors:[],target:3,info:''}); assert(result.action.emptyKnife); assert.equal(result.action.target,'');
-  phase(g,3); assert.throws(()=>a.addDeath(g,1,'explode'),/正确睁眼/);
+  phase(g,3); assert.throws(()=>a.addDeath(g,1,'explode'),/已出局/);
 });
 check('dual automatic actors follow upper cards and hidden wolf', () => {
   const g = fixed('dual', [['villager','hiddenwolf'], ['wolf','villager'], ['villager','seer'], ['seer','villager'], ['villager','villager'], ['witch','hunter']]);

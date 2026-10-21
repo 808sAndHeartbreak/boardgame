@@ -4,7 +4,7 @@
 - 地址：<https://boardgame.run.ingarena.net/>
 - 应用端口：`3000`
 - 健康检查：<https://boardgame.run.ingarena.net/healthz>
-- 应用版本：`1.0.0`，首个应用提交 `9afdf8e`
+- 应用版本：`1.0.1`，首个应用提交 `9afdf8e`
 - 运行方式：RUN 容器内 Node.js，后台 `nohup` 进程。
 - RUN 项目源代码保持私有。
 

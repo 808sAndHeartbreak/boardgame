@@ -1207,7 +1207,7 @@ function makeConfig(mode,n){
     goldMin:1,goldMax:n,forbidWolfSeer:true,allowDoubleWolf:true,
     wolfMin:1,wolfMax:n,order:'player',
     king:'finish',singleLoss:'off',silence:false,win:'golden',seerCheck:'active',
-    firstGod:'normal',goodWin:'allCards',wolfAwake:'active'
+    firstGod:'normal',goodWin:'allCards',wolfAwake:'active',wolfNoWakePenalty:true
   }};
 }
 function roleMap(config){return Object.fromEntries(config.roles.map(r=>[r.id,r]))}
@@ -1319,6 +1319,11 @@ function correctActor(game,player,actionId,ignoreAction){
 function awakenedWolves(game){
   return new Set(Object.entries(game.actions).filter(([key,a])=>a.id==='wolves'&&Number(key.split(':')[0])<=game.phase).flatMap(([,a])=>a.correctActors||[]));
 }
+function sleepingWolves(game,actors,ignoreAction){
+  if(game.mode!=='confidence'||game.phase<2||game.phase%2!==0||game.config.rules.wolfNoWakePenalty===false)return [];
+  const awake=new Set(actors.map(Number));
+  return game.players.filter(p=>!awake.has(p.seat)&&correctActor(game,p,'wolves',ignoreAction)).map(p=>p.seat);
+}
 function seerResult(game,player){
   const s=playerStatus(game,player),roles=roleMap(game.config);
   if(!s.alive)return '已出局';
@@ -1361,13 +1366,14 @@ function restorationPlan(game,seat,slot){
 function restoreCard(game,seat,slot){
   if(isHistory(game))throw new Error('请回到最新阶段修改状态');
   const events=restorationPlan(game,seat,slot),ids=new Set(events.map(e=>e.id));
-  for(const e of events)if(e.actionKey){const a=game.actions[e.actionKey];if(a){a.actors=a.actors.filter(n=>n!==e.seat);a.correctActors=(a.correctActors||[]).filter(n=>n!==e.seat);a.records=(a.records||[]).filter(r=>r.seat!==e.seat)}}
+  for(const e of events)if(e.actionKey){const a=game.actions[e.actionKey];if(a){if(e.reason==='missedWake'){a.actors=Array.from(new Set(a.actors.concat(e.seat)));a.correctActors=Array.from(new Set((a.correctActors||[]).concat(e.seat)));a.emptyKnife=false}else{a.actors=a.actors.filter(n=>n!==e.seat);a.correctActors=(a.correctActors||[]).filter(n=>n!==e.seat);a.records=(a.records||[]).filter(r=>r.seat!==e.seat)}}}
   game.events=game.events.filter(e=>!ids.has(e.id));return events;
 }
 function addDeath(game,seat,reason,extra={}){
   if(isHistory(game))throw new Error('请回到最新阶段记录出局');
   if(reason==='miswake'&&game.mode!=='confidence')throw new Error('只有自信狼记录睁错眼');
   const player=game.players.find(p=>p.seat===seat),status=player&&playerStatus(game,player);if(!status?.alive)throw new Error('该玩家已出局');
+  if(reason==='missedWake'&&(game.mode!=='confidence'||game.phase<2||game.phase%2!==0||!correctActor(game,player,'wolves')))throw new Error('仅记录自信狼夜间未睁眼的在场狼人');
   if(game.mode==='confidence'&&game.phase===0&&reason==='wolf')throw new Error('自信狼首夜无刀');
   if(reason==='explode'&&game.phase%2===0)throw new Error('自爆须在白天记录');
   if(reason==='explode'&&!handInfo(player.cards,roleMap(game.config)).wolf)throw new Error('只有狼人玩家可以自爆');
@@ -1406,6 +1412,7 @@ function recordAction(game,id,draft){
   const actors=game.mode==='confidence'?Array.from(new Set(draft.actors.map(Number))).filter(n=>game.players.some(p=>p.seat===n)):(previous?.correctActors||game.players.filter(p=>correctActor(game,p,id,key)).map(p=>p.seat));
   const correctActors=game.mode==='confidence'?actors.filter(seat=>correctActor(game,game.players[seat-1],id,key)):actors.slice();
   const wrong=game.mode==='confidence'?actors.filter(seat=>!correctActors.includes(seat)&&playerStatus(game,game.players[seat-1],key).alive):[];
+  const sleeping=id==='wolves'?sleepingWolves(game,actors,key):[];
   const firstConfirm=game.mode==='confidence'&&game.phase===0&&game.config.rules.firstGod==='confirm';
   const records=id==='wolves'?[]:correctActors.map(seat=>{
     const player=game.players[seat-1],slot=previous?.records?.find(r=>r.seat===seat)?.slot??playerStatus(game,player,key).active;
@@ -1443,7 +1450,8 @@ function recordAction(game,id,draft){
   const action={...clone(draft),recordedAt:previous?.recordedAt||Date.now(),id,phase:game.phase,actors,correctActors,records,target:id==='wolves'?target:records[0]?.target||'',potion:records[0]?.potion||'none',result:records[0]?.result||'',emptyKnife:id==='wolves'&&correctActors.length===0};
   game.events=game.events.filter(e=>e.actionKey!==key);
   for(const seat of wrong)if(playerStatus(game,game.players[seat-1]).alive)addDeath(game,seat,'miswake',{actionKey:key,noLastWords:true});
-  game.actions[key]=action;return {action,wrong};
+  for(const seat of sleeping)if(playerStatus(game,game.players[seat-1]).alive)addDeath(game,seat,'missedWake',{actionKey:key});
+  game.actions[key]=action;return {action,wrong,sleeping};
 }
 
 function phaseName(index){return '第 '+(Math.floor(index/2)+1)+(index%2?' 天':' 夜')}
@@ -1617,6 +1625,7 @@ function renderSettings(c,mode){
     html+='<div class="brief">至少一位双民金宝宝 · 预言家查验顶层身份<br>好人清空全部狼牌获胜；狼人清空金宝宝获胜。</div>';
   }
   if(mode==='confidence'){
+    html+=ruleToggle('wolfNoWakePenalty','狼未睁眼惩罚出局');
     html+=`<div class="brief"><ol><li>看下家底牌，号码 +1，末位看 1 号。</li><li>跳过首夜；第一天两轮发言后放逐投票。</li><li>无警长；睁错眼暴毙，无遗言。</li><li>查验真实底牌；无狼睁眼为空刀。</li><li>已睁眼的狼可自爆；天亮只报出局者。</li></ol></div>`;
 
   }else html+=ruleToggle('sheriff','警长竞选');
@@ -1770,7 +1779,7 @@ function actionSummary(step){
   const records=actionRecords(g,a,g.phase+':'+a.id);
   return records.map(r=>r.seat+'号'+(r.potion==='save'?'解药':r.potion==='poison'?'毒药':'')+(r.target?' → '+r.target+'号':'')+(r.result?' · '+r.result:'')+(r.info?' · '+r.info:'')).join('；')|| (g.mode==='confidence'?'无正确睁眼者':'无可行动玩家');
 }
-const DEATH_NAMES={idiotFlip:'白痴翻牌',wolf:'狼刀',poison:'中毒',vote:'放逐',shot:'猎枪',explode:'自爆',whiteblast:'白狼王带人',miswake:'睁错眼',duel:'决斗',finish:'完杀',other:'其他'};
+const DEATH_NAMES={idiotFlip:'白痴翻牌',wolf:'狼刀',poison:'中毒',vote:'放逐',shot:'猎枪',explode:'自爆',whiteblast:'白狼王带人',miswake:'睁错眼',missedWake:'狼未睁眼',duel:'决斗',finish:'完杀',other:'其他'};
 function eventMarkup(e){
   const g=state.game,p=g.players.find(p=>p.seat===e.seat),roles=roleMap(g.config);
   const cardNames=(e.reason==='idiotFlip'?[e.cardSlot]:e.slots).map(i=>roles[p.cards[i]]?.name||'身份').join('、');
@@ -1934,7 +1943,7 @@ function toggleCardStatus(seat,slot){
   if(!g.started||isHistory(g))return;
   if(st.lost.has(slot)){
     const plan=restorationPlan(g,seat,slot),label=g.mode==='dual'?(slot?'下身份':'上身份'):'身份';
-    askConfirm('恢复 '+seat+' 号'+label+'？',(plan[0]?.slots.length>1?'该次出局涉及两张身份，将一并恢复。':'会撤销对应的倒牌或出局记录。')+(plan.length>1?'同时撤销 '+(plan.length-1)+' 条后续或关联记录。':'')+(plan.some(e=>e.actionKey)?'同时撤回对应的睁眼选择。':''),'确认恢复',()=>{restoreCard(g,seat,slot);recentPlayerStatus={seat,slot};save();render();openPlayer(seat);toast('已恢复',{success:true})});
+    askConfirm('恢复 '+seat+' 号'+label+'？',(plan[0]?.slots.length>1?'该次出局涉及两张身份，将一并恢复。':'会撤销对应的倒牌或出局记录。')+(plan.length>1?'同时撤销 '+(plan.length-1)+' 条后续或关联记录。':'')+(plan.some(e=>e.reason==='missedWake')?'同时将对应狼人改为已睁眼。':'')+(plan.some(e=>e.actionKey&&e.reason!=='missedWake')?'同时撤回对应的睁眼选择。':''),'确认恢复',()=>{restoreCard(g,seat,slot);recentPlayerStatus={seat,slot};save();render();openPlayer(seat);toast('已恢复',{success:true})});
     $('sheet').dataset.returnPlayer=String(seat);offerSheetBack(()=>openPlayer(seat),'返回玩家');return;
   }
   if(st.active!==slot)return;
@@ -1991,6 +2000,7 @@ function targetOptions(target,actorSeat,kind){
 function renderAction(){
   const g=state.game,{id,key,step}=actionContext,roles=roleMap(g.config),readonly=isHistory(g),selected=actionDraft.actors,correct=currentCorrectActors();
   const wrong=g.mode==='confidence'?selected.filter(n=>!correct.includes(n)):[];
+  const sleeping=id==='wolves'&&!readonly?sleepingWolves(g,selected,key):[];
   const allowed=actionAllowed(),firstNoKnife=g.mode==='confidence'&&g.phase===0&&id==='wolves';
   const effect=id==='wolves'?'team':roleEffect(roles[id]);
   const preview=id==='wolves'?(firstNoKnife?'狼人请睁眼。首夜无刀，仅确认实际睁眼者。':g.mode==='confidence'?'狼人请睁眼，共同确认刀口。无人正确睁眼则为空刀。':'狼人请睁眼，共同确认刀口。'):(roles[id]?.skill||step.hint);
@@ -2011,7 +2021,7 @@ function renderAction(){
     return html+'</section>';
   }).join('');
   openSheet(step.name,`<div class="action-context"><span>${phaseName(g.phase)}</span><span>${MODE_NAMES[g.mode]}</span></div>${readonly?'<div class="history-banner">历史行动 · 仅供查看</div>':''}<details class="callout-details"><summary>技能与口播</summary><p>${esc(preview)}</p></details><div class="section actor-section"><div class="section-head"><h3>${g.mode==='confidence'?'实际睁眼者':readonly||g.actions[key]?'行动时玩家':'本环节行动者'}</h3><span class="small muted">${g.mode==='confidence'?'点选号码':'按身份确定'}</span></div>${g.mode==='confidence'?`<div class="actor-grid">${g.players.map(p=>{const s=playerStatus(g,p,key),bad=wrong.includes(p.seat);return `<button class="actor ${selected.includes(p.seat)?'selected':''} ${bad?'wrong':''}" data-action="actor" data-seat="${p.seat}" aria-pressed="${selected.includes(p.seat)}" ${readonly||!s.alive?'disabled':''}>${p.seat}</button>`}).join('')}</div>`:`<div class="automatic-actors">${correct.length?correct.map(n=>`<span>${String(n).padStart(2,'0')}<small>号</small></span>`).join(''):'<p class="empty">无</p>'}</div>`}${wrong.length?`<div class="alert">${wrong.map(n=>n+' 号').join('、')} 睁眼身份不符；确认后暴毙，无遗言。</div>`:''}</div>${fields}<div id="action-result">${actionResultMarkup()}</div>${effect==='text'&&correct.length?'':`<label class="field"><span>行动信息</span><textarea class="short" data-action-field="info" placeholder="结果、技能与结算提醒" ${readonly?'disabled':''}>${esc(actionDraft.info)}</textarea></label>`}`,readonly?'<button class="secondary full-width" data-action="closeSheet">关闭</button>':'<button class="primary" data-action="saveAction">确认行动</button>');
-  if(!readonly){if(!actionBaseline)actionBaseline=JSON.stringify(actionDraft);protectSheet(()=>JSON.stringify(actionDraft)!==actionBaseline,renderAction)}
+  if(!readonly){if(wrong.length+sleeping.length)$('sheet').querySelector('[data-action=saveAction]').textContent='确认行动 · '+(wrong.length+sleeping.length)+' 人出局';if(!actionBaseline)actionBaseline=JSON.stringify(actionDraft);protectSheet(()=>JSON.stringify(actionDraft)!==actionBaseline,renderAction)}
 }
 function recordResultMarkup(seat){
   const g=state.game,record=draftRecord(seat),r=roleMap(g.config)[actionContext.id];
@@ -2021,16 +2031,18 @@ function recordResultMarkup(seat){
 }
 function actionResultMarkup(){
   const g=state.game,id=actionContext.id;
+  const sleeping=id==='wolves'&&!isHistory(g)?sleepingWolves(g,actionDraft.actors,actionContext.key):[];
+  const penalty=sleeping.length?'<div class="alert">'+sleeping.map(n=>n+' 号').join('、')+' 狼人未睁眼；确认后惩罚出局。</div>':'';
   if(g.mode==='confidence'&&g.phase===0&&id==='wolves')return '<div class="result">首夜无刀</div>';
-  if(id==='wolves'&&!currentCorrectActors().length)return '<div class="result">'+(g.mode==='confidence'?'空刀 · 没有狼人正确睁眼':'空刀 · 当前没有可行动的狼人')+'</div>';
+  if(id==='wolves'&&!currentCorrectActors().length)return penalty+'<div class="result">'+(g.mode==='confidence'?'空刀 · 没有狼人正确睁眼':'空刀 · 当前没有可行动的狼人')+'</div>';
   if(!actionAllowed()&&g.mode==='confidence'&&g.phase===0&&g.config.rules.firstGod==='confirm')return '<div class="result">首夜仅确认，不使用技能</div>';
-  return '';
+  return penalty;
 }
 function saveAction(){
   try{
     const result=recordAction(state.game,actionContext.id,actionDraft);
     const name=actionContext.step.name;toggleDone(actionContext.id,true);save();closeSheet();renderGame();
-    recordedFeedback(name,result.wrong.length?result.wrong.map(n=>n+'号').join('、')+' 暴毙，无遗言':'');
+    recordedFeedback(name,[result.wrong.length?result.wrong.map(n=>n+'号').join('、')+' 暴毙，无遗言':'',result.sleeping.length?result.sleeping.map(n=>n+'号').join('、')+' 未睁眼，惩罚出局':''].filter(Boolean).join('；'));
   }catch(e){toast(e.message)}
 }
 
@@ -2061,7 +2073,7 @@ function deathReasonDisabled(id){
 }
 function renderDeath(){
   const g=state.game,alive=g.players.filter(p=>playerStatus(g,p).alive),finish=eligibleFinishSources(),shots=eligibleShotSources(g),blasts=eligibleWhiteBlastSources(g);
-  const options=Object.entries(DEATH_NAMES).filter(([id])=>!['idiotFlip',...(g.mode==='confidence'?[]:['miswake'])].includes(id)&&(id!=='finish'||finish.length)&&(id!=='shot'||shots.length)&&(id!=='whiteblast'||blasts.length));
+  const options=Object.entries(DEATH_NAMES).filter(([id])=>!['idiotFlip','missedWake',...(g.mode==='confidence'?[]:['miswake'])].includes(id)&&(id!=='finish'||finish.length)&&(id!=='shot'||shots.length)&&(id!=='whiteblast'||blasts.length));
   if(deathReasonDisabled(deathContext.reason))deathContext.reason='other';
   const p=g.players[deathContext.seat-1],s=playerStatus(g,p),r=roleMap(g.config)[p.cards[s.active]];
   if(deathContext.reason==='shot'&&shots.length===1&&!deathContext.sourceEventId)deathContext.sourceEventId=shots[0].eventId;
@@ -2096,6 +2108,7 @@ function openRules(){
     rules=['每人两张身份；上身份生效，倒牌后下身份解锁。两张都倒后玩家出局。',r.order==='player'?'玩家查看时可交换上下身份，确认后锁定。开始记录前主持人仍可调配。':'按发牌顺序锁定上下身份；开始记录前主持人仍可调配。','任一张有效身份为狼人，该玩家属于狼人阵营。复刻牌复制另一张并置于下身份。'+'生效狼牌或仍持有隐狼牌的玩家必须随狼队睁眼。','金宝宝为两张有效身份均是平民的玩家，至少一人。'+(r.forbidWolfSeer?'狼与预言家不能同手。':''),'好人'+(r.goodWin==='awakeWolves'?'清空所有可睁眼的狼人':'清空全部狼牌')+'获胜；狼人'+(r.win==='edge'?'清空全部金宝宝或全部神牌':'清空全部金宝宝')+'获胜。',r.king==='finish'?'金刚狼可完杀一次，一次带走目标剩余两张身份；发动前两张狼牌都须在场。':r.king==='checkGood'?'金刚狼上牌查为好人，下身份按当前狼牌判定。':'金刚狼按普通双狼处理，不额外获得技能。',r.singleLoss==='phase'?'同一阶段最多倒一张牌，完杀例外。':r.singleLoss==='round'?'同一整轮最多倒一张牌，完杀例外。':'同轮可多次倒牌。',r.silence?'夜间首张身份倒牌后，白天禁言、禁票一轮。':'仍有身份的玩家可正常发言与投票。',self+'。预言家查验'+(r.seerCheck==='faction'?'两牌最终阵营。':'当前生效身份；隐狼本牌验好。')];
   }
   if(mode==='confidence')rules=['每位玩家查看下家的底牌：点击自己号码 +1 的号码牌；末位玩家点击 1 号。','完全跳过首夜，从第一天开始；两轮发言后进行放逐投票。','没有警长竞选。好人淘汰全部狼人，狼人淘汰全部平民或全部神职获胜。','夜间按身份环节叫醒。正确睁眼者可行使技能；睁错眼者暴毙，没有遗言。','预言家查验真实底牌。狼人的底牌始终查为狼人，与是否睁眼无关。','没有狼人正确睁眼，视为空刀。已正确睁眼的狼可在白天自爆。','第二天及之后天亮时只宣布哪些人出局，不向玩家展示死亡原因。',self.replace('首夜','首个实际夜晚')+'。开局不安排任何夜间行动。'];
+  if(mode==='confidence')rules.splice(6,0,r.wolfNoWakePenalty!==false?'狼未睁眼惩罚出局已开启：狼人环节未睁眼的在场狼人直接出局。':'狼未睁眼惩罚出局已关闭：未睁眼的狼人不因此出局。');
   rules.push('行动目标与实际倒牌分别记录；守护、魅惑、连锁技能和胜负由主持人按局况确认。');
   const sources=mode==='dual'?`<a href="https://zydwz2001.github.io/two-identities-werewolf/" target="_blank" rel="noreferrer">5–8 人牌库</a><a href="https://www.langrensha.net/strategy/2022092701.html" target="_blank" rel="noreferrer">双身份版本一</a><a href="https://zhuanlan.zhihu.com/p/2078496581888881121" target="_blank" rel="noreferrer">双身份版本二</a>`:mode==='standard'?`<a href="https://werewolves.games/yu-nv-lie-bai/" target="_blank" rel="noreferrer">预女猎白参考</a>`:'按本局约定';
   openSheet(MODE_NAMES[mode]+' · 本局规则',`<div class="rule-copy"><ol>${rules.map(text=>'<li>'+esc(text)+'</li>').join('')}</ol></div><div class="rule-divider"><h3 style="margin-bottom:12px">身份技能</h3>${c.roles.filter(role=>role.count).map(role=>`<div style="margin-top:13px"><strong class="small">${esc(role.name)} ×${role.count}</strong><p class="small muted" style="line-height:1.75;margin-top:4px">${esc(role.skill)}</p></div>`).join('')}</div><div class="source-links">${sources}</div>`);

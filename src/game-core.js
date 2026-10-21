@@ -33,7 +33,7 @@ function makeConfig(mode,n){
     goldMin:1,goldMax:n,forbidWolfSeer:true,allowDoubleWolf:true,
     wolfMin:1,wolfMax:n,order:'player',
     king:'finish',singleLoss:'off',silence:false,win:'golden',seerCheck:'active',
-    firstGod:'normal',goodWin:'allCards',wolfAwake:'active'
+    firstGod:'normal',goodWin:'allCards',wolfAwake:'active',wolfNoWakePenalty:true
   }};
 }
 function roleMap(config){return Object.fromEntries(config.roles.map(r=>[r.id,r]))}
@@ -145,6 +145,11 @@ function correctActor(game,player,actionId,ignoreAction){
 function awakenedWolves(game){
   return new Set(Object.entries(game.actions).filter(([key,a])=>a.id==='wolves'&&Number(key.split(':')[0])<=game.phase).flatMap(([,a])=>a.correctActors||[]));
 }
+function sleepingWolves(game,actors,ignoreAction){
+  if(game.mode!=='confidence'||game.phase<2||game.phase%2!==0||game.config.rules.wolfNoWakePenalty===false)return [];
+  const awake=new Set(actors.map(Number));
+  return game.players.filter(p=>!awake.has(p.seat)&&correctActor(game,p,'wolves',ignoreAction)).map(p=>p.seat);
+}
 function seerResult(game,player){
   const s=playerStatus(game,player),roles=roleMap(game.config);
   if(!s.alive)return '已出局';
@@ -187,13 +192,14 @@ function restorationPlan(game,seat,slot){
 function restoreCard(game,seat,slot){
   if(isHistory(game))throw new Error('请回到最新阶段修改状态');
   const events=restorationPlan(game,seat,slot),ids=new Set(events.map(e=>e.id));
-  for(const e of events)if(e.actionKey){const a=game.actions[e.actionKey];if(a){a.actors=a.actors.filter(n=>n!==e.seat);a.correctActors=(a.correctActors||[]).filter(n=>n!==e.seat);a.records=(a.records||[]).filter(r=>r.seat!==e.seat)}}
+  for(const e of events)if(e.actionKey){const a=game.actions[e.actionKey];if(a){if(e.reason==='missedWake'){a.actors=Array.from(new Set(a.actors.concat(e.seat)));a.correctActors=Array.from(new Set((a.correctActors||[]).concat(e.seat)));a.emptyKnife=false}else{a.actors=a.actors.filter(n=>n!==e.seat);a.correctActors=(a.correctActors||[]).filter(n=>n!==e.seat);a.records=(a.records||[]).filter(r=>r.seat!==e.seat)}}}
   game.events=game.events.filter(e=>!ids.has(e.id));return events;
 }
 function addDeath(game,seat,reason,extra={}){
   if(isHistory(game))throw new Error('请回到最新阶段记录出局');
   if(reason==='miswake'&&game.mode!=='confidence')throw new Error('只有自信狼记录睁错眼');
   const player=game.players.find(p=>p.seat===seat),status=player&&playerStatus(game,player);if(!status?.alive)throw new Error('该玩家已出局');
+  if(reason==='missedWake'&&(game.mode!=='confidence'||game.phase<2||game.phase%2!==0||!correctActor(game,player,'wolves')))throw new Error('仅记录自信狼夜间未睁眼的在场狼人');
   if(game.mode==='confidence'&&game.phase===0&&reason==='wolf')throw new Error('自信狼首夜无刀');
   if(reason==='explode'&&game.phase%2===0)throw new Error('自爆须在白天记录');
   if(reason==='explode'&&!handInfo(player.cards,roleMap(game.config)).wolf)throw new Error('只有狼人玩家可以自爆');
@@ -232,6 +238,7 @@ function recordAction(game,id,draft){
   const actors=game.mode==='confidence'?Array.from(new Set(draft.actors.map(Number))).filter(n=>game.players.some(p=>p.seat===n)):(previous?.correctActors||game.players.filter(p=>correctActor(game,p,id,key)).map(p=>p.seat));
   const correctActors=game.mode==='confidence'?actors.filter(seat=>correctActor(game,game.players[seat-1],id,key)):actors.slice();
   const wrong=game.mode==='confidence'?actors.filter(seat=>!correctActors.includes(seat)&&playerStatus(game,game.players[seat-1],key).alive):[];
+  const sleeping=id==='wolves'?sleepingWolves(game,actors,key):[];
   const firstConfirm=game.mode==='confidence'&&game.phase===0&&game.config.rules.firstGod==='confirm';
   const records=id==='wolves'?[]:correctActors.map(seat=>{
     const player=game.players[seat-1],slot=previous?.records?.find(r=>r.seat===seat)?.slot??playerStatus(game,player,key).active;
@@ -269,7 +276,8 @@ function recordAction(game,id,draft){
   const action={...clone(draft),recordedAt:previous?.recordedAt||Date.now(),id,phase:game.phase,actors,correctActors,records,target:id==='wolves'?target:records[0]?.target||'',potion:records[0]?.potion||'none',result:records[0]?.result||'',emptyKnife:id==='wolves'&&correctActors.length===0};
   game.events=game.events.filter(e=>e.actionKey!==key);
   for(const seat of wrong)if(playerStatus(game,game.players[seat-1]).alive)addDeath(game,seat,'miswake',{actionKey:key,noLastWords:true});
-  game.actions[key]=action;return {action,wrong};
+  for(const seat of sleeping)if(playerStatus(game,game.players[seat-1]).alive)addDeath(game,seat,'missedWake',{actionKey:key});
+  game.actions[key]=action;return {action,wrong,sleeping};
 }
 
 function phaseName(index){return '第 '+(Math.floor(index/2)+1)+(index%2?' 天':' 夜')}
